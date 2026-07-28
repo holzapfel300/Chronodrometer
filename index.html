@@ -1,1 +1,858 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#050505" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Chronodrometer" />
+  <title>Chronodrometer</title>
 
+  <style>
+    :root {
+      --bg: #050505;
+      --panel: #111214;
+      --panel-2: #17191c;
+      --line: #8f949b;
+      --line-dark: #3e4349;
+      --text: #f3f3f3;
+      --muted: #9da2a8;
+      --red: #ef2b31;
+      --shadow: rgba(0, 0, 0, 0.65);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "SF Pro Display",
+        "Helvetica Neue",
+        Arial,
+        sans-serif;
+      overflow-x: hidden;
+    }
+
+    body {
+      min-height: 100svh;
+      padding:
+        calc(env(safe-area-inset-top) + 28px)
+        18px
+        calc(env(safe-area-inset-bottom) + 24px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 26px;
+    }
+
+    .title {
+      margin-top: 4px;
+      font-size: clamp(19px, 4.4vw, 30px);
+      font-weight: 700;
+      letter-spacing: 0.24em;
+      text-indent: 0.24em;
+      color: #d8d8d8;
+      user-select: none;
+    }
+
+    .gauge-wrap {
+      width: min(92vw, 760px);
+      aspect-ratio: 1;
+      position: relative;
+      filter: drop-shadow(0 22px 35px var(--shadow));
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .controls {
+      width: min(92vw, 760px);
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid #3f4348;
+      background: #15171a;
+      color: #f2f2f2;
+      border-radius: 14px;
+      padding: 14px 16px;
+      font-size: 16px;
+      font-weight: 650;
+      letter-spacing: 0.01em;
+      box-shadow: 0 7px 18px rgba(0, 0, 0, 0.35);
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    .status {
+      width: min(92vw, 760px);
+      min-height: 24px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.4;
+      padding: 0 8px;
+    }
+
+    .hint {
+      width: min(92vw, 760px);
+      color: #70757b;
+      font-size: 12px;
+      line-height: 1.45;
+      text-align: center;
+      margin-top: -10px;
+    }
+
+    @media (min-height: 900px) {
+      body {
+        gap: 34px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="title">CHRONODROMETER</div>
+
+  <div class="gauge-wrap">
+    <canvas id="gauge" aria-label="Chronodrometer Tacho"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn" type="button">GPS starten</button>
+    <button id="demoBtn" type="button">Demo</button>
+  </div>
+
+  <div class="status" id="status">Bereit.</div>
+
+  <div class="hint">
+    Für GPS muss die Seite über HTTPS geöffnet werden.
+    Auf dem iPhone Standortzugriff erlauben.
+  </div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const canvas = document.getElementById("gauge");
+      const ctx = canvas.getContext("2d");
+      const statusEl = document.getElementById("status");
+      const startBtn = document.getElementById("startBtn");
+      const demoBtn = document.getElementById("demoBtn");
+
+      let watchId = null;
+      let currentSpeed = 0;
+      let targetSpeed = 0;
+      let lastFrame = performance.now();
+      let demoTimer = null;
+      let gpsActive = false;
+
+      const minSpeed = 0;
+      const maxSpeed = 100;
+
+      const startAngle = Math.PI * 0.75;
+      const endAngle = Math.PI * 2.25;
+      const sweep = endAngle - startAngle;
+
+      function resizeCanvas() {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = Math.max(
+          1,
+          Math.min(3, window.devicePixelRatio || 1)
+        );
+
+        canvas.width = Math.round(rect.width * dpr);
+        canvas.height = Math.round(rect.height * dpr);
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+
+      function speedToAngle(speed) {
+        const limitedSpeed = Math.max(
+          minSpeed,
+          Math.min(maxSpeed, speed)
+        );
+
+        return startAngle + (limitedSpeed / maxSpeed) * sweep;
+      }
+
+      function paceForSpeed(speed) {
+        if (!Number.isFinite(speed) || speed < 0.5) {
+          return null;
+        }
+
+        return 60 / speed;
+      }
+
+      function formatPace(speed) {
+        const pace = paceForSpeed(speed);
+
+        if (pace === null) {
+          return "–:––";
+        }
+
+        let minutes = Math.floor(pace);
+        let seconds = Math.round((pace - minutes) * 60);
+
+        if (seconds === 60) {
+          minutes += 1;
+          seconds = 0;
+        }
+
+        return `${minutes}:${String(seconds).padStart(2, "0")}`;
+      }
+
+      function roundedRect(x, y, width, height, radius) {
+        const limitedRadius = Math.min(
+          radius,
+          width / 2,
+          height / 2
+        );
+
+        ctx.beginPath();
+        ctx.moveTo(x + limitedRadius, y);
+
+        ctx.arcTo(
+          x + width,
+          y,
+          x + width,
+          y + height,
+          limitedRadius
+        );
+
+        ctx.arcTo(
+          x + width,
+          y + height,
+          x,
+          y + height,
+          limitedRadius
+        );
+
+        ctx.arcTo(
+          x,
+          y + height,
+          x,
+          y,
+          limitedRadius
+        );
+
+        ctx.arcTo(
+          x,
+          y,
+          x + width,
+          y,
+          limitedRadius
+        );
+
+        ctx.closePath();
+      }
+
+      function draw() {
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const radius = Math.min(width, height) * 0.46;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const backgroundGradient = ctx.createRadialGradient(
+          centerX,
+          centerY * 0.95,
+          radius * 0.05,
+          centerX,
+          centerY,
+          radius
+        );
+
+        backgroundGradient.addColorStop(0, "#17191c");
+        backgroundGradient.addColorStop(0.65, "#111214");
+        backgroundGradient.addColorStop(1, "#0b0c0e");
+
+        ctx.beginPath();
+        ctx.arc(
+          centerX,
+          centerY,
+          radius,
+          0,
+          Math.PI * 2
+        );
+
+        ctx.fillStyle = backgroundGradient;
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(
+          centerX,
+          centerY,
+          radius,
+          0,
+          Math.PI * 2
+        );
+
+        ctx.lineWidth = Math.max(3, radius * 0.012);
+        ctx.strokeStyle = "#8c9197";
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(
+          centerX,
+          centerY,
+          radius * 0.945,
+          0,
+          Math.PI * 2
+        );
+
+        ctx.lineWidth = Math.max(2, radius * 0.007);
+        ctx.strokeStyle = "#34383d";
+        ctx.stroke();
+
+        for (let speed = 0; speed <= 100; speed += 2) {
+          const angle = speedToAngle(speed);
+
+          const isMajor = speed % 10 === 0;
+          const isMedium = speed % 5 === 0;
+
+          const outerRadius = radius * 0.865;
+
+          const innerRadius = isMajor
+            ? radius * 0.73
+            : isMedium
+              ? radius * 0.77
+              : radius * 0.80;
+
+          const startX =
+            centerX + Math.cos(angle) * outerRadius;
+
+          const startY =
+            centerY + Math.sin(angle) * outerRadius;
+
+          const endX =
+            centerX + Math.cos(angle) * innerRadius;
+
+          const endY =
+            centerY + Math.sin(angle) * innerRadius;
+
+          ctx.beginPath();
+          ctx.moveTo(startX, startY);
+          ctx.lineTo(endX, endY);
+
+          ctx.lineWidth = isMajor
+            ? Math.max(2.2, radius * 0.008)
+            : isMedium
+              ? Math.max(1.5, radius * 0.0055)
+              : 1;
+
+          ctx.strokeStyle = isMajor
+            ? "#e2e3e5"
+            : isMedium
+              ? "#a2a6ab"
+              : "#5a5f65";
+
+          ctx.stroke();
+
+          if (isMajor) {
+            const labelRadius = radius * 0.64;
+
+            const labelX =
+              centerX + Math.cos(angle) * labelRadius;
+
+            const labelY =
+              centerY + Math.sin(angle) * labelRadius;
+
+            ctx.save();
+
+            ctx.fillStyle = "#d7d9dc";
+
+            ctx.font =
+              `700 ${Math.max(12, radius * 0.065)}px ` +
+              `-apple-system, BlinkMacSystemFont, Arial`;
+
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+
+            ctx.fillText(
+              String(speed),
+              labelX,
+              labelY
+            );
+
+            ctx.restore();
+          }
+        }
+
+        const paceMarks = [
+          60,
+          30,
+          20,
+          15,
+          12,
+          10,
+          8,
+          6,
+          5,
+          4,
+          3,
+          2,
+          1
+        ];
+
+        for (const pace of paceMarks) {
+          const speed = 60 / pace;
+
+          if (speed < 1 || speed > 100) {
+            continue;
+          }
+
+          const angle = speedToAngle(speed);
+          const paceRadius = radius * 0.50;
+
+          const paceX =
+            centerX + Math.cos(angle) * paceRadius;
+
+          const paceY =
+            centerY + Math.sin(angle) * paceRadius;
+
+          ctx.save();
+
+          ctx.fillStyle = "#888d93";
+
+          ctx.font =
+            `600 ${Math.max(9, radius * 0.042)}px ` +
+            `-apple-system, BlinkMacSystemFont, Arial`;
+
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+
+          ctx.fillText(
+            String(pace),
+            paceX,
+            paceY
+          );
+
+          ctx.restore();
+        }
+
+        ctx.fillStyle = "#9ca1a7";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        ctx.font =
+          `700 ${Math.max(11, radius * 0.053)}px ` +
+          `-apple-system, BlinkMacSystemFont, Arial`;
+
+        ctx.fillText(
+          "KM/H",
+          centerX,
+          centerY - radius * 0.33
+        );
+
+        ctx.font =
+          `650 ${Math.max(10, radius * 0.047)}px ` +
+          `-apple-system, BlinkMacSystemFont, Arial`;
+
+        ctx.fillText(
+          "MIN/KM",
+          centerX,
+          centerY - radius * 0.24
+        );
+
+        const needleAngle = speedToAngle(currentSpeed);
+        const needleLength = radius * 0.70;
+        const tailLength = radius * 0.14;
+        const needleWidth = radius * 0.026;
+
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.rotate(needleAngle);
+
+        ctx.beginPath();
+        ctx.moveTo(
+          -tailLength,
+          -needleWidth * 0.42
+        );
+
+        ctx.lineTo(
+          needleLength,
+          0
+        );
+
+        ctx.lineTo(
+          -tailLength,
+          needleWidth * 0.42
+        );
+
+        ctx.closePath();
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.42)";
+        ctx.translate(4, 5);
+        ctx.fill();
+
+        ctx.restore();
+
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.rotate(needleAngle);
+
+        ctx.beginPath();
+
+        ctx.moveTo(
+          -tailLength,
+          -needleWidth * 0.42
+        );
+
+        ctx.lineTo(
+          needleLength,
+          0
+        );
+
+        ctx.lineTo(
+          -tailLength,
+          needleWidth * 0.42
+        );
+
+        ctx.closePath();
+
+        ctx.fillStyle = "#ef2b31";
+        ctx.fill();
+
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.arc(
+          centerX,
+          centerY,
+          radius * 0.082,
+          0,
+          Math.PI * 2
+        );
+
+        ctx.fillStyle = "#f4f4f4";
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(
+          centerX,
+          centerY,
+          radius * 0.068,
+          0,
+          Math.PI * 2
+        );
+
+        ctx.fillStyle = "#111214";
+        ctx.fill();
+
+        ctx.lineWidth = Math.max(
+          2,
+          radius * 0.008
+        );
+
+        ctx.strokeStyle = "#bfc2c5";
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(
+          centerX,
+          centerY,
+          radius * 0.032,
+          0,
+          Math.PI * 2
+        );
+
+        ctx.fillStyle = "#ef2b31";
+        ctx.fill();
+
+        const displayWidth = radius * 0.92;
+        const displayHeight = radius * 0.26;
+
+        const displayX =
+          centerX - displayWidth / 2;
+
+        const displayY =
+          centerY + radius * 0.18;
+
+        roundedRect(
+          displayX,
+          displayY,
+          displayWidth,
+          displayHeight,
+          14
+        );
+
+        ctx.fillStyle = "rgba(8, 9, 10, 0.70)";
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = "#f4f4f4";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        ctx.font =
+          `800 ${Math.max(28, radius * 0.16)}px ` +
+          `-apple-system, BlinkMacSystemFont, Arial`;
+
+        ctx.fillText(
+          String(Math.round(currentSpeed)),
+          centerX,
+          displayY + displayHeight * 0.39
+        );
+
+        ctx.fillStyle = "#aeb2b7";
+
+        ctx.font =
+          `700 ${Math.max(10, radius * 0.046)}px ` +
+          `-apple-system, BlinkMacSystemFont, Arial`;
+
+        ctx.fillText(
+          "KM/H",
+          centerX,
+          displayY + displayHeight * 0.76
+        );
+
+        ctx.fillStyle = "#f2f2f2";
+
+        ctx.font =
+          `800 ${Math.max(19, radius * 0.09)}px ` +
+          `-apple-system, BlinkMacSystemFont, Arial`;
+
+        ctx.fillText(
+          `${formatPace(currentSpeed)} MIN/KM`,
+          centerX,
+          centerY + radius * 0.56
+        );
+      }
+
+      function animate(now) {
+        const deltaTime = Math.min(
+          0.05,
+          (now - lastFrame) / 1000
+        );
+
+        lastFrame = now;
+
+        const smoothing =
+          1 - Math.pow(0.0008, deltaTime);
+
+        currentSpeed +=
+          (targetSpeed - currentSpeed) * smoothing;
+
+        if (
+          Math.abs(targetSpeed - currentSpeed) < 0.01
+        ) {
+          currentSpeed = targetSpeed;
+        }
+
+        draw();
+        requestAnimationFrame(animate);
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function stopDemo() {
+        if (demoTimer) {
+          clearInterval(demoTimer);
+          demoTimer = null;
+        }
+
+        demoBtn.textContent = "Demo";
+      }
+
+      function stopGps() {
+        if (
+          watchId !== null &&
+          navigator.geolocation
+        ) {
+          navigator.geolocation.clearWatch(watchId);
+          watchId = null;
+        }
+
+        gpsActive = false;
+        startBtn.textContent = "GPS starten";
+      }
+
+      function startGps() {
+        stopDemo();
+
+        if (!("geolocation" in navigator)) {
+          setStatus(
+            "Dieses Gerät unterstützt keine Standortbestimmung."
+          );
+
+          return;
+        }
+
+        if (!window.isSecureContext) {
+          setStatus(
+            "GPS ist nur über HTTPS verfügbar. Bitte die GitHub-Pages-Adresse öffnen."
+          );
+
+          return;
+        }
+
+        setStatus("GPS wird gestartet …");
+        startBtn.textContent = "GPS stoppen";
+        gpsActive = true;
+
+        watchId =
+          navigator.geolocation.watchPosition(
+            position => {
+              const metersPerSecond =
+                position.coords.speed;
+
+              const speedKmh =
+                Number.isFinite(metersPerSecond) &&
+                metersPerSecond >= 0
+                  ? metersPerSecond * 3.6
+                  : 0;
+
+              targetSpeed = Math.max(
+                0,
+                Math.min(100, speedKmh)
+              );
+
+              const accuracy = Math.round(
+                position.coords.accuracy || 0
+              );
+
+              setStatus(
+                `GPS aktiv · Genauigkeit etwa ${accuracy} m`
+              );
+            },
+
+            error => {
+              stopGps();
+              targetSpeed = 0;
+
+              const messages = {
+                1:
+                  "Standortzugriff wurde verweigert. Bitte in Safari erlauben.",
+                2:
+                  "Standort konnte nicht ermittelt werden.",
+                3:
+                  "Zeitüberschreitung bei der Standortbestimmung."
+              };
+
+              setStatus(
+                messages[error.code] ||
+                "GPS-Fehler."
+              );
+            },
+
+            {
+              enableHighAccuracy: true,
+              maximumAge: 1000,
+              timeout: 15000
+            }
+          );
+      }
+
+      startBtn.addEventListener(
+        "click",
+        () => {
+          if (gpsActive) {
+            stopGps();
+            targetSpeed = 0;
+            setStatus("GPS gestoppt.");
+          } else {
+            startGps();
+          }
+        }
+      );
+
+      demoBtn.addEventListener(
+        "click",
+        () => {
+          if (demoTimer) {
+            stopDemo();
+            targetSpeed = 0;
+            setStatus("Demo gestoppt.");
+            return;
+          }
+
+          stopGps();
+
+          demoBtn.textContent =
+            "Demo stoppen";
+
+          setStatus("Demo aktiv.");
+
+          const values = [
+            0,
+            8,
+            18,
+            30,
+            45,
+            60,
+            75,
+            90,
+            100,
+            70,
+            40,
+            15
+          ];
+
+          let index = 0;
+
+          targetSpeed = values[index];
+
+          demoTimer = setInterval(
+            () => {
+              index =
+                (index + 1) % values.length;
+
+              targetSpeed = values[index];
+            },
+            1500
+          );
+        }
+      );
+
+      window.addEventListener(
+        "resize",
+        () => {
+          resizeCanvas();
+          draw();
+        }
+      );
+
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (document.hidden) {
+            lastFrame = performance.now();
+          }
+        }
+      );
+
+      resizeCanvas();
+      draw();
+      requestAnimationFrame(animate);
+    })();
+  </script>
+</body>
+</html>
